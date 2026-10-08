@@ -100,7 +100,7 @@ async function handleFormSubmission(modelType) {
     if (data.success) {
       showAlert(
         "success",
-        `Predictions generated successfully using ${modelType} model!`
+        `Predictions generated successfully using ${modelType} model!`,
       );
       displayResults(data);
     } else {
@@ -202,11 +202,12 @@ function displayResults(data) {
   document.getElementById("healthyCount").textContent =
     statistics.healthy_count || 0;
 
-  // Create charts
-  createRULProgressionChart(predictions);
+  // [MODIFIED] RUL Progression chart animates point-by-point at 0.3s delay.
+  // All other charts render immediately as before.
   createHealthDistributionChart(statistics);
   createRULHistogramChart(predictions.rul_minutes || []);
   createUrgencyChart(statistics);
+  animateRULProgressionChart(predictions); // ← replaces createRULProgressionChart
 
   // Show alerts based on conditions
   const criticalCount = statistics.critical_count || 0;
@@ -215,21 +216,120 @@ function displayResults(data) {
   if (criticalCount > 0) {
     showAlert(
       "warning",
-      `🚨 CRITICAL: ${criticalCount} sequences need immediate maintenance!`
+      `🚨 CRITICAL: ${criticalCount} sequences need immediate maintenance!`,
     );
   } else if (severeCount > 0) {
     showAlert(
       "warning",
-      `⚠️ WARNING: ${severeCount} sequences in severe condition. Plan maintenance soon.`
+      `⚠️ WARNING: ${severeCount} sequences in severe condition. Plan maintenance soon.`,
     );
   }
+}
+
+// ==================== [NEW] ANIMATED RUL PROGRESSION CHART ====================
+// Receives the full predictions object, builds the line chart incrementally.
+// Each point is added every 300 ms — the delay is purely visual; all data
+// arrived in the single /predict response.
+
+function animateRULProgressionChart(predictions) {
+  const data = predictions.rul_minutes || [];
+  const indices = predictions.sequence_indices || [];
+
+  if (data.length === 0) return;
+
+  // Destroy existing chart
+  if (rulProgressionChart) {
+    rulProgressionChart.destroy();
+    rulProgressionChart = null;
+  }
+
+  // Size canvas to final width up-front so the scroll container works
+  const canvas = document.getElementById("rulProgressionChart");
+  const minWidth = Math.max(800, indices.length * 15);
+  canvas.style.width = `${minWidth}px`;
+
+  const ctx = canvas.getContext("2d");
+
+  // Create chart with empty data arrays
+  rulProgressionChart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: [],
+      datasets: [
+        {
+          label: "Predicted RUL (minutes)",
+          data: [],
+          borderColor: "#3b82f6",
+          backgroundColor: "rgba(59, 130, 246, 0.1)",
+          borderWidth: 2,
+          fill: true,
+          tension: 0.4,
+          pointRadius: 3,
+          pointHoverRadius: 6,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      aspectRatio: 3,
+      // Disable Chart.js built-in animation so our interval controls timing
+      animation: { duration: 0 },
+      plugins: {
+        legend: { display: true, position: "top" },
+        tooltip: {
+          callbacks: {
+            label: function (context) {
+              const rul = context.parsed.y.toFixed(2);
+              const hours = (context.parsed.y / 60).toFixed(2);
+              return `RUL: ${rul} min (${hours} hrs)`;
+            },
+          },
+        },
+      },
+      scales: {
+        y: {
+          beginAtZero: true,
+          title: {
+            display: true,
+            text: "RUL (minutes)",
+            font: { size: 14, weight: "bold" },
+          },
+          ticks: { callback: (v) => v.toFixed(0) },
+        },
+        x: {
+          title: {
+            display: true,
+            text: "Sequence Index",
+            font: { size: 14, weight: "bold" },
+          },
+          ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 20 },
+        },
+      },
+    },
+  });
+
+  // Feed one point every 300 ms
+  let i = 0;
+  const DELAY_MS = 300;
+
+  const timer = setInterval(() => {
+    if (i >= data.length) {
+      clearInterval(timer);
+      return;
+    }
+    rulProgressionChart.data.labels.push(indices[i]);
+    rulProgressionChart.data.datasets[0].data.push(data[i]);
+    rulProgressionChart.update("none"); // "none" = skip animation per tick
+    i++;
+  }, DELAY_MS);
 }
 
 // ==================== DISPLAY CLASSIFICATION CARDS ====================
 
 function displayClassificationCards(classifications) {
   const classificationSection = document.getElementById(
-    "classificationSection"
+    "classificationSection",
   );
   const cardsContainer = document.getElementById("classificationCards");
 
@@ -239,7 +339,10 @@ function displayClassificationCards(classifications) {
     return;
   }
 
-  console.log("Displaying classification cards for:", Object.keys(classifications));
+  console.log(
+    "Displaying classification cards for:",
+    Object.keys(classifications),
+  );
   classificationSection.style.display = "block";
   cardsContainer.innerHTML = "";
 
@@ -277,18 +380,22 @@ function displayEnsembleCard(result, container) {
   card.className = `classification-card ${severityClass}`;
 
   // Build class distribution HTML if available
-  let distributionHTML = '';
-  if (result.class_distribution && Object.keys(result.class_distribution).length > 0) {
-    distributionHTML = '<div class="class-distribution"><h4>📊 Prediction Distribution:</h4><ul>';
+  let distributionHTML = "";
+  if (
+    result.class_distribution &&
+    Object.keys(result.class_distribution).length > 0
+  ) {
+    distributionHTML =
+      '<div class="class-distribution"><h4>📊 Prediction Distribution:</h4><ul>';
     for (const [className, data] of Object.entries(result.class_distribution)) {
       distributionHTML += `<li><strong>${className}:</strong> ${data.count} segments (${data.percentage.toFixed(1)}%)</li>`;
     }
-    distributionHTML += '</ul></div>';
+    distributionHTML += "</ul></div>";
   }
 
   card.innerHTML = `
     <div class="classification-header">
-      <h3>🤖 ${result.model_type || 'Ensemble Model'}</h3>
+      <h3>🤖 ${result.model_type || "Ensemble Model"}</h3>
       <span class="confidence-badge">
         ${(result.confidence * 100).toFixed(1)}% Confidence
       </span>
@@ -336,100 +443,6 @@ function displayEnsembleCard(result, container) {
 
 // ==================== CREATE CHARTS ====================
 
-function createRULProgressionChart(predictions) {
-  const ctx = document.getElementById("rulProgressionChart").getContext("2d");
-
-  if (rulProgressionChart) {
-    rulProgressionChart.destroy();
-  }
-
-  const data = predictions.rul_minutes || [];
-  const indices = predictions.sequence_indices || [];
-
-  if (data.length === 0) {
-    console.warn("No data available for RUL progression chart");
-    return;
-  }
-
-  // Set canvas width dynamically based on data points
-  const canvas = document.getElementById("rulProgressionChart");
-  const minWidth = Math.max(800, indices.length * 15);
-  canvas.style.width = `${minWidth}px`;
-
-  rulProgressionChart = new Chart(ctx, {
-    type: "line",
-    data: {
-      labels: indices,
-      datasets: [
-        {
-          label: "Predicted RUL (minutes)",
-          data: data,
-          borderColor: "#3b82f6",
-          backgroundColor: "rgba(59, 130, 246, 0.1)",
-          borderWidth: 2,
-          fill: true,
-          tension: 0.4,
-          pointRadius: 3,
-          pointHoverRadius: 6,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: true,
-      aspectRatio: 3,
-      plugins: {
-        legend: {
-          display: true,
-          position: "top",
-        },
-        tooltip: {
-          callbacks: {
-            label: function (context) {
-              const rul = context.parsed.y.toFixed(2);
-              const hours = (context.parsed.y / 60).toFixed(2);
-              return `RUL: ${rul} min (${hours} hrs)`;
-            },
-          },
-        },
-      },
-      scales: {
-        y: {
-          beginAtZero: true,
-          title: {
-            display: true,
-            text: "RUL (minutes)",
-            font: {
-              size: 14,
-              weight: "bold",
-            },
-          },
-          ticks: {
-            callback: function (value) {
-              return value.toFixed(0);
-            },
-          },
-        },
-        x: {
-          title: {
-            display: true,
-            text: "Sequence Index",
-            font: {
-              size: 14,
-              weight: "bold",
-            },
-          },
-          ticks: {
-            maxRotation: 0,
-            autoSkip: true,
-            maxTicksLimit: 20,
-          },
-        },
-      },
-    },
-  });
-}
-
 function createHealthDistributionChart(statistics) {
   const ctx = document
     .getElementById("healthDistributionChart")
@@ -475,7 +488,7 @@ function createHealthDistributionChart(statistics) {
                   const value = data.datasets[0].data[i];
                   const total = data.datasets[0].data.reduce(
                     (a, b) => a + b,
-                    0
+                    0,
                   );
                   const percentage =
                     total > 0 ? ((value / total) * 100).toFixed(1) : 0;
